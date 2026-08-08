@@ -487,6 +487,9 @@ rm -rf /etc/cron.d/postconf
 
     Write-ProgressIndicator
 
+    # Set for RedHat machines further down, and read again when the DVD drives are added
+    $kickstartIsoPath = $null
+
     if ($Machine.OperatingSystemType -eq 'Linux')
     {
         $nextDriveLetter = [char[]](67..90) |
@@ -531,7 +534,24 @@ rm -rf /etc/cron.d/postconf
         if ($machine.LinuxType -eq 'RedHat')
         {
             Export-UnattendedFile -Path (Join-Path -Path $drive.RootDirectory -ChildPath ks.cfg) -Version $machine.OperatingSystem.Version.Major
-            Copy-Item -Path (Join-Path -Path $drive.RootDirectory -ChildPath ks.cfg) -Destination (Join-Path -Path $script:lab.Sources.UnattendedXml.Value -ChildPath "ks_$($Machine.Name).cfg")
+            $kickstartCopy = Join-Path -Path $script:lab.Sources.UnattendedXml.Value -ChildPath "ks_$($Machine.Name).cfg"
+            Copy-Item -Path (Join-Path -Path $drive.RootDirectory -ChildPath ks.cfg) -Destination $kickstartCopy
+
+            # Anaconda on Oracle Linux 9 and later resolves LABEL=OEMDRV with a disks-only
+            # lookup, so the label on the partition created above is never matched and the
+            # kickstart is ignored. Ship the same file on an OEMDRV labelled ISO as well,
+            # because an optical drive is a whole device and is matched. The partition is
+            # deliberately kept, so distributions that do find it are unaffected.
+            $kickstartIsoPath = Join-Path -Path $script:lab.Sources.UnattendedXml.Value -ChildPath "ks_$($Machine.Name)_OEMDRV.iso"
+            try
+            {
+                $null = New-LWKickstartIso -SourceFile $kickstartCopy -Path $kickstartIsoPath -ErrorAction Stop
+            }
+            catch
+            {
+                Write-ScreenInfo -Type Warning -Message "Could not create the kickstart ISO for '$($Machine.Name)': $($_.Exception.Message). Continuing with the OEMDRV partition only."
+                $kickstartIsoPath = $null
+            }
         }
         elseif ($Machine.LinuxType -eq 'Suse')
         {
@@ -747,6 +767,16 @@ rm -rf /etc/cron.d/postconf
     if ( $Machine.OperatingSystemType -eq 'Linux')
     {
         $dvd = $vm | Add-VMDvdDrive -Path $Machine.OperatingSystem.IsoPath -Passthru
+
+        # Second carrier for the kickstart, see the comment where the ISO is created.
+        # It must never become the boot device, so it is added after the installation
+        # media and Set-VMFirmware below keeps pointing at $dvd.
+        if ($kickstartIsoPath -and (Test-Path -Path $kickstartIsoPath))
+        {
+            Write-PSFMessage -Message "Attaching kickstart ISO '$kickstartIsoPath' as an additional DVD drive"
+            $null = $vm | Add-VMDvdDrive -Path $kickstartIsoPath
+        }
+
         if ( $Machine.LinuxType -in 'RedHat','Ubuntu') {
             $vm | Set-VMFirmware -FirstBootDevice $dvd
         }
